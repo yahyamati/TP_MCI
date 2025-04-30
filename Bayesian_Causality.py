@@ -1,10 +1,9 @@
 from enum import Enum
-from typing import List, Dict
+from typing import List, Dict,Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 
-# Enum for node states and relation direction
 class NodeState(Enum):
     KNOWN = "known"
     UNKNOWN = "unknown"
@@ -18,7 +17,6 @@ class RelationType(Enum):
     SERIES = "en_serie"          # X -> Z -> Y
     DIVERGENTE = "divergente"    # Z -> X, Z -> Y
 
-# Node class
 class Node:
     def __init__(self, name: str, state: NodeState = NodeState.UNKNOWN):
         self.name = name
@@ -27,7 +25,6 @@ class Node:
     def __str__(self):
         return f"{self.name} ({self.state.value})"
 
-# Relation class
 class Relation:
     def __init__(self, source: Node, target: Node, direction: Direction):
         self.source = source
@@ -37,7 +34,6 @@ class Relation:
     def __str__(self):
         return f"{self.source} {self.direction.value} {self.target}"
 
-# BayesianNetwork class
 class BayesianNetwork:
     def __init__(self):
         self.nodes: Dict[str, Node] = {}
@@ -56,86 +52,178 @@ class BayesianNetwork:
     def infer_relation_type(self, node: Node) -> RelationType:
         incoming = [r for r in self.relations if r.target == node]
         outgoing = [r for r in self.relations if r.source == node]
-
         if len(incoming) >= 2 and len(outgoing) == 0:
-            return RelationType.CONVERGENTE  # X -> Z <- Y
+            return RelationType.CONVERGENTE
         elif len(incoming) == 1 and len(outgoing) == 1:
-            return RelationType.SERIES  # X -> Z -> Y
+            return RelationType.SERIES
         elif len(incoming) == 0 and len(outgoing) >= 2:
-            return RelationType.DIVERGENTE  # Z -> X, Z -> Y
+            return RelationType.DIVERGENTE
         return None
+    
+    
+    def has_cycle(self) -> List[str]:
+        """Vérifie si le graphe contient un cycle et retourne le cycle sous forme de liste de nœuds."""
+        visited = set()
+        rec_stack = set()
+        parent = {}  # Suit le parent de chaque nœud pour reconstruire le cycle
+        cycle = []
+
+        def dfs(node: Node) -> bool:
+            visited.add(node.name)
+            rec_stack.add(node.name)
+
+            # Trouver les voisins (relations directes)
+            neighbors = [r.target for r in self.relations if r.source == node and r.direction == Direction.FORWARD]
+            for neighbor in neighbors:
+                if neighbor.name not in visited:
+                    parent[neighbor.name] = node.name  # Enregistrer le parent
+                    if dfs(neighbor):
+                        return True
+                elif neighbor.name in rec_stack and not cycle:
+                    # Cycle détecté, reconstruire le cycle
+                    current = node.name
+                    cycle.append(current)
+                    while current != neighbor.name:
+                        current = parent[current]
+                        cycle.append(current)
+                    cycle.append(neighbor.name)  # Ajouter le nœud final pour fermer le cycle
+                    cycle.reverse()  # Inverser pour avoir l'ordre correct
+                    return True
+
+            rec_stack.remove(node.name)
+            return False
+
+        for node in self.nodes.values():
+            if node.name not in visited:
+                parent[node.name] = None  # Nœud racine n'a pas de parent
+                if dfs(node):
+                    return cycle
+        return []
+
+    def find_all_triplets(self) -> List[Tuple[Node, Node, Node, str, RelationType]]:
+        """Find all triplets (series, convergente, divergente) in the graph."""
+        triplets = []
+        
+        # Series: X -> Z -> Y
+        for rel1 in self.relations:
+            if rel1.direction == Direction.FORWARD:
+                x, z = rel1.source, rel1.target
+                for rel2 in self.relations:
+                    if rel2.source == z and rel2.direction == Direction.FORWARD:
+                        y = rel2.target
+                        path_segment = f"{x.name}->{z.name}->{y.name}"
+                        triplets.append((x, z, y, path_segment, RelationType.SERIES))
+        
+        # Convergente: X -> Z <- Y
+        for z in self.nodes.values():
+            incoming = [r for r in self.relations if r.target == z and r.direction == Direction.FORWARD]
+            if len(incoming) >= 2:
+                for i, rel1 in enumerate(incoming):
+                    for rel2 in incoming[i+1:]:
+                        x, y = rel1.source, rel2.source
+                        path_segment = f"{x.name}->{z.name}<->{y.name}"
+                        triplets.append((x, z, y, path_segment, RelationType.CONVERGENTE)) 
+        
+        # Divergente: Z -> X, Z -> Y
+        for z in self.nodes.values():
+            outgoing = [r for r in self.relations if r.source == z and r.direction == Direction.FORWARD]
+            if len(outgoing) >= 2:
+                for i, rel1 in enumerate(outgoing):
+                    for rel2 in outgoing[i+1:]:
+                        x, y = rel1.target, rel2.target
+                        path_segment = f"{z.name}->{x.name},{z.name}->{y.name}"
+                        triplets.append((x, z, y, path_segment, RelationType.DIVERGENTE))
+        
+        return triplets
 
     def compute_final_path(self) -> str:
         if len(self.relations) < 1:
             return "Error: At least one relation is required."
+        
+        cycle = self.has_cycle()
+        if cycle:
+            return f"Cycle détecté : {','.join(cycle)}"
 
-        path_parts = []
+        # Store valid triplets where flow is allowed
+        valid_triplets = {}  # (x, z, y) -> (path_segment, relation_type)
         flow_justifications = []
-        can_flow = True
 
-        for i, rel in enumerate(self.relations):
-            # Use only node names for the path
+        # Test all triplets
+        for x, z, y, path_segment, rel_type in self.find_all_triplets():
+            if rel_type == RelationType.SERIES:
+                if z.state == NodeState.UNKNOWN:
+                    valid_triplets[(x.name, z.name, y.name)] = (path_segment, rel_type)
+                    flow_justifications.append(
+                        f"Information can flow from {x} to {y} because {z} is unknown (en série)"
+                    )
+                else:
+                    flow_justifications.append(
+                        f"Information cannot flow from {x} to {y} because {z} is known (en série)"
+                    )
+            elif rel_type == RelationType.CONVERGENTE:
+                if z.state == NodeState.KNOWN:
+                    valid_triplets[(x.name, z.name, y.name)] = (path_segment, rel_type)
+                    flow_justifications.append(
+                        f"Information can flow from {x} to {y} because {z} is known (convergente)"
+                    )
+                else:
+                    flow_justifications.append(
+                        f"Information cannot flow from {x} to {y} because {z} is unknown (convergente)"
+                    )
+            elif rel_type == RelationType.DIVERGENTE:
+                if z.state == NodeState.UNKNOWN:
+                    valid_triplets[(x.name, z.name, y.name)] = (path_segment, rel_type)
+                    flow_justifications.append(
+                        f"Information can flow from {x} to {y} because {z} is unknown (divergente)"
+                    )
+                else:
+                    flow_justifications.append(
+                        f"Information cannot flow from {x} to {y} because {z} is known (divergente)"
+                    )
+
+        # Print valid triplets for debugging
+        print("Valid Triplets Dictionary:")
+        for key, (value, rel_type) in valid_triplets.items():
+            print(f"  {key}: {value} ({rel_type.value})")
+
+        # Find the first node (no incoming edges)
+        all_nodes = set(self.nodes.keys())
+        target_nodes = set()
+        for rel in self.relations:
             if rel.direction == Direction.FORWARD:
-                segment = f"{rel.source.name}->{rel.target.name}"
+                target_nodes.add(rel.target.name)
             else:
-                segment = f"{rel.target.name}<-{rel.source.name}"
+                target_nodes.add(rel.source.name)
+        first_nodes = all_nodes - target_nodes
 
-            if i > 0:
-                prev_rel = self.relations[i - 1]
-                if prev_rel.target == rel.source:  # Series: X -> Z -> Y
-                    z = rel.source
-                    x = prev_rel.source
-                    y = rel.target
-                    if self.infer_relation_type(z) == RelationType.SERIES:
-                        if z.state == NodeState.UNKNOWN:
-                            flow_justifications.append(
-                                f"Information can flow from {x} to {y} because {z} is unknown (en série)"
-                            )
-                            if can_flow:
-                                path_parts.append(segment)
-                        else:
-                            flow_justifications.append(
-                                f"Information cannot flow from {x} to {y} because {z} is known (en série)"
-                            )
-                            can_flow = False
-                elif rel.target == prev_rel.target:  # Convergente: X -> Z <- Y
-                    z = rel.target
-                    x = prev_rel.source
-                    y = rel.source
-                    if self.infer_relation_type(z) == RelationType.CONVERGENTE:
-                        if z.state == NodeState.KNOWN:
-                            flow_justifications.append(
-                                f"Information can flow from {x} to {y} because {z} is known (convergente)"
-                            )
-                            if can_flow:
-                                path_parts.append(segment)
-                        else:
-                            flow_justifications.append(
-                                f"Information cannot flow from {x} to {y} because {z} is unknown (convergente)"
-                            )
-                            can_flow = False
-            else:
-                if can_flow:
-                    path_parts.append(segment)
+        # Combine triplets into paths
+        final_paths = []
+        def build_path(current_triplet: Tuple[str, str, str], path: List[str], start_node: str):
+            if not path:
+                path = [valid_triplets[current_triplet][0]]
+            x, z, y = current_triplet
+            # Find triplets starting at y
+            next_triplets = [(x2, z2, y2) for (x2, z2, y2) in valid_triplets if x2 == y]
+            if not next_triplets:
+                # Only add path if it starts with a first node
+                if start_node in first_nodes:
+                    final_paths.append("->".join(path))
+                return
+            for next_triplet in next_triplets:
+                build_path(next_triplet, path + [valid_triplets[next_triplet][0]], start_node)
 
-            if self.infer_relation_type(rel.source) == RelationType.DIVERGENTE:
-                outgoing = [r for r in self.relations if r.source == rel.source]
-                if len(outgoing) >= 2:
-                    x, y = outgoing[0].target, outgoing[1].target
-                    z = rel.source
-                    if z.state == NodeState.UNKNOWN:
-                        flow_justifications.append(
-                            f"Information can flow from {x} to {y} because {z} is unknown (divergente)"
-                        )
-                    else:
-                        flow_justifications.append(
-                            f"Information cannot flow from {x} to {y} because {z} is known (divergente)"
-                        )
-                        can_flow = False
+        # Start building paths from each valid triplet
+        for triplet in valid_triplets:
+            x, _, _ = triplet
+            build_path(triplet, [], x)
 
-        final_path = "".join(path_parts) if path_parts else "No path where information can flow"
+        # Format output
+        if not final_paths:
+            final_path = "No path where information can flow"
+        else:
+            final_path = "\n".join(f"Path: {path}" for path in final_paths)
         justification = "Justification:\n" + "\n".join(flow_justifications) if flow_justifications else "Justification: No flow possible."
-        return f"Final Path: {final_path}\n{justification}"
+        return f"Final Paths:\n{final_path}\n{justification}"
     
     
     
